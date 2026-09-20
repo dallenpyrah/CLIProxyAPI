@@ -169,6 +169,14 @@ func responsesWebsocketProviderSetForModel(resolvedModelName string) (map[string
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
 	}
+	modelKey := baseModel
+	if len(providers) == 0 {
+		// Router-style "provider/model" IDs map onto a registered model.
+		var resolved string
+		if providers, resolved = util.ResolveProviderPrefixedModel(baseModel); resolved != "" {
+			modelKey = resolved
+		}
+	}
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {
 		providerKey := strings.TrimSpace(strings.ToLower(provider))
@@ -177,7 +185,6 @@ func responsesWebsocketProviderSetForModel(resolvedModelName string) (map[string
 		}
 		providerSet[providerKey] = struct{}{}
 	}
-	modelKey := baseModel
 	if modelKey == "" {
 		modelKey = strings.TrimSpace(resolvedModelName)
 	}

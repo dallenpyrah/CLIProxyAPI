@@ -78,6 +78,40 @@ func GetProviderName(modelName string) []string {
 	return providers
 }
 
+// ResolveProviderPrefixedModel resolves a router-style "provider/model" identifier to
+// the providers and registered model ID capable of serving it. Gateways such as Amp
+// send canonical provider/model names (e.g. "openai/gpt-6-astra",
+// "anthropic/claude-opus-5") verbatim; the registry keys them differently, so the
+// bare name is tried first, then the devin-namespaced variants with and without dot
+// normalization (e.g. "zhipuai/glm-5.3" -> "devin/glm-5-3").
+//
+// Parameters:
+//   - modelName: The canonical model name to resolve.
+//
+// Returns:
+//   - []string: Provider identifiers for the resolved model, nil when unresolved.
+//   - string: The registered model ID that matched, or "" when none did.
+func ResolveProviderPrefixedModel(modelName string) ([]string, string) {
+	idx := strings.LastIndex(modelName, "/")
+	if idx <= 0 || idx >= len(modelName)-1 {
+		return nil, ""
+	}
+	base := strings.TrimSpace(modelName[idx+1:])
+	if base == "" {
+		return nil, ""
+	}
+	candidates := []string{base, "devin/" + base}
+	if dashed := strings.ReplaceAll(base, ".", "-"); dashed != base {
+		candidates = append(candidates, "devin/"+dashed)
+	}
+	for _, candidate := range candidates {
+		if providers := GetProviderName(candidate); len(providers) > 0 {
+			return providers, candidate
+		}
+	}
+	return nil, ""
+}
+
 // ResolveAutoModel resolves the "auto" model name to an actual available model.
 // It uses an empty handler type to get any available model from the registry.
 //
