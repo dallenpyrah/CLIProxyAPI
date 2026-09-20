@@ -11,6 +11,9 @@
 #   CPA_PORT             Listen port (default: 8317)
 #   API_KEYS             Comma-separated client API keys seeded into api-keys
 #   MANAGEMENT_PASSWORD  Remote management secret (read by the server itself)
+#
+# The seeded config enables remote management; without a secret configured the
+# management routes stay locked (403), so exposing the port is safe.
 set -e
 
 CONFIG_PATH="${CPA_CONFIG_PATH:-/data/config.yaml}"
