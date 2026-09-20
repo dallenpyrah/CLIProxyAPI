@@ -30,12 +30,17 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 	modelRegistry.RegisterClient("test-request-details-claude", "claude", []*registry.ModelInfo{
 		{ID: "claude-sonnet-4-5", Created: now + 5},
 	})
+	modelRegistry.RegisterClient("test-request-details-devin", "devin", []*registry.ModelInfo{
+		{ID: "devin/kimi-k3", Created: now + 4},
+		{ID: "devin/glm-5-3", Created: now + 3},
+	})
 
 	// Ensure cleanup of all test registrations.
 	clientIDs := []string{
 		"test-request-details-gemini",
 		"test-request-details-openai",
 		"test-request-details-claude",
+		"test-request-details-devin",
 	}
 	for _, clientID := range clientIDs {
 		id := clientID
@@ -101,6 +106,41 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 			wantProviders: []string{"claude"},
 			wantModel:     "claude-sonnet-4-5(auto)",
 			wantErr:       false,
+		},
+		{
+			name:          "provider prefix resolves to bare model",
+			inputModel:    "openai/gpt-5.2",
+			wantProviders: []string{"openai"},
+			wantModel:     "gpt-5.2",
+			wantErr:       false,
+		},
+		{
+			name:          "provider prefix preserves suffix",
+			inputModel:    "anthropic/claude-sonnet-4-5(high)",
+			wantProviders: []string{"claude"},
+			wantModel:     "claude-sonnet-4-5(high)",
+			wantErr:       false,
+		},
+		{
+			name:          "provider prefix resolves to devin model",
+			inputModel:    "moonshotai/kimi-k3",
+			wantProviders: []string{"devin"},
+			wantModel:     "devin/kimi-k3",
+			wantErr:       false,
+		},
+		{
+			name:          "provider prefix normalizes dots for devin model",
+			inputModel:    "zhipuai/glm-5.3",
+			wantProviders: []string{"devin"},
+			wantModel:     "devin/glm-5-3",
+			wantErr:       false,
+		},
+		{
+			name:          "unresolvable provider prefix still errors",
+			inputModel:    "openai/not-a-real-model",
+			wantProviders: nil,
+			wantModel:     "",
+			wantErr:       true,
 		},
 	}
 

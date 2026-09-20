@@ -200,6 +200,18 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	}
 
 	if len(providers) == 0 {
+		// Router-style "provider/model" IDs (Amp, OpenRouter, …) are not registered
+		// verbatim; map them onto a registered model so canonical names resolve.
+		if prefixedProviders, resolved := util.ResolveProviderPrefixedModel(baseModel); len(prefixedProviders) > 0 {
+			providers = prefixedProviders
+			resolvedModelName = resolved
+			if parsed.HasSuffix {
+				resolvedModelName = fmt.Sprintf("%s(%s)", resolved, parsed.RawSuffix)
+			}
+		}
+	}
+
+	if len(providers) == 0 {
 		// The client asked for a model this proxy cannot route. Report it as a request
 		// error so streaming clients receive an actionable message instead of a
 		// gateway failure they would keep retrying. 400 is used rather than 404 to keep
