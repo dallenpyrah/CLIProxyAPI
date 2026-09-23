@@ -465,18 +465,17 @@ func withClaudeAdvisorToolBeta(betas string) string {
 	return strings.Join(parts, ",")
 }
 
-// claudeEntitlementError marks an upstream refusal that is a property of the
-// request shape combined with the account's entitlements, not of the credential's
-// health. The auth manager must neither rotate nor cool down on these.
-type claudeEntitlementError struct {
+// claudeRequestScopedRateLimitError marks a refusal tied to this request rather
+// than the credential's health. The auth manager must neither rotate nor cool down.
+type claudeRequestScopedRateLimitError struct {
 	statusErr
 }
 
-func (claudeEntitlementError) IsRequestScoped() bool {
+func (claudeRequestScopedRateLimitError) IsRequestScoped() bool {
 	return true
 }
 
-func (claudeEntitlementError) IsCredentialScoped() bool {
+func (claudeRequestScopedRateLimitError) IsCredentialScoped() bool {
 	return false
 }
 
@@ -493,8 +492,8 @@ func (e claudeRateLimitError) IsRequestScoped() bool {
 	return false
 }
 
-// classifyClaudeUpstreamError promotes upstream refusals that no other credential
-// can satisfy into request-scoped errors.
+// classifyClaudeUpstreamError promotes request-specific upstream refusals to
+// request-scoped errors, leaving the credential available for smaller requests.
 //
 // Anthropic answers a fast-mode request from an account without the matching
 // usage credits with 429 rate_limit_error "Usage credits are required for fast
@@ -514,16 +513,25 @@ func classifyClaudeUpstreamErrorWithCooling(statusCode int, headers http.Header,
 	}
 	err := statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter}
 	if statusCode == http.StatusTooManyRequests {
+		if claudeBodyIndicatesWouldExceedAllowance(body) {
+			return claudeRequestScopedRateLimitError{err}
+		}
 		if !modelLevelCooling && helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
 			return claudeRateLimitError{statusErr: err, credentialScoped: true}
 		}
 		if claudeBodyIndicatesFastModeCredits(body) {
-			return claudeEntitlementError{err}
+			return claudeRequestScopedRateLimitError{err}
 		}
 		// Ordinary model-level Claude 429 (not a unified 5h/7d rejection)
 		return claudeRateLimitError{statusErr: err, credentialScoped: false}
 	}
 	return err
+}
+
+// A request that would exceed the remaining allowance does not imply that the
+// account is exhausted; a smaller request may still succeed before the reset.
+func claudeBodyIndicatesWouldExceedAllowance(body []byte) bool {
+	return strings.Contains(strings.ToLower(gjson.GetBytes(body, "error.message").String()), "this request would exceed your account's rate limit")
 }
 
 // claudeBodyIndicatesFastModeCredits matches Anthropic's fast-mode entitlement

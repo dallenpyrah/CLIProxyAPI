@@ -417,6 +417,52 @@ func TestClaudeExecutor_RateLimit_FastEntitlementWithRetryAfterRemainsRequestSco
 	}
 }
 
+func TestClaudeExecutor_RequestWouldExceedAllowanceDoesNotCoolCredential(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 2 {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"msg-small","type":"message","model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+			return
+		}
+		w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		w.Header().Set("Anthropic-Ratelimit-Unified-7d-Status", "rejected")
+		w.Header().Set("Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(time.Now().Add(72*time.Hour).Unix(), 10))
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Try a smaller request."}}`))
+	}))
+	defer server.Close()
+
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.RegisterExecutor(NewClaudeExecutor(&config.Config{}))
+	auth := &cliproxyauth.Auth{
+		ID: uuid.NewString(), Provider: "claude",
+		Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL},
+	}
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-opus-5-5"}})
+	t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	request := cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: []byte(`{"max_tokens":128000,"messages":[{"role":"user","content":"large request"}]}`)}
+	_, err := manager.Execute(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err == nil || attempts.Load() != 1 {
+		t.Fatalf("large request = %v, upstream attempts = %d; want one upstream refusal", err, attempts.Load())
+	}
+	registered, _ := manager.GetByID(auth.ID)
+	if registered == nil || registered.Quota.Exceeded || registered.Unavailable || len(registered.ModelStates) != 0 {
+		t.Fatalf("request-specific rejection cooled the credential: %+v", registered)
+	}
+	request.Payload = []byte(`{"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	response, err := manager.Execute(context.Background(), []string{"claude"}, request, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude})
+	if err != nil || attempts.Load() != 2 || !strings.Contains(string(response.Payload), `"ok"`) {
+		t.Fatalf("small request = %v, upstream attempts = %d, response = %s; want success", err, attempts.Load(), response.Payload)
+	}
+}
+
 func TestClaudeExecutor_AuthManager_CredentialScopeBlocksAllModelsAndAliases(t *testing.T) {
 	var upstreamAttempts atomic.Int32
 	now := time.Now()
