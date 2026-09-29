@@ -88,6 +88,27 @@ func isOverageOrFableOnlyRejection(headers http.Header, status5h, status7d, stat
 	return false
 }
 
+// ClaudeHeadersIndicateExhaustedSharedWindow reports whether a shared 5h or 7d window is both
+// rejected and fully consumed (utilization >= 1.0). Such a window refuses every request, however
+// small, so the refusal belongs to the credential rather than to the request's size.
+func ClaudeHeadersIndicateExhaustedSharedWindow(headers http.Header) bool {
+	if headers == nil {
+		return false
+	}
+	for _, window := range []string{"5h", "7d"} {
+		status := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-"+window+"-Status")))
+		if status != "rejected" {
+			continue
+		}
+		raw := strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-"+window+"-Utilization"))
+		u, errParse := strconv.ParseFloat(raw, 64)
+		if errParse == nil && !math.IsNaN(u) && u >= 1.0 {
+			return true
+		}
+	}
+	return false
+}
+
 func isClaudeUtilizationHealthy(raw string) bool {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

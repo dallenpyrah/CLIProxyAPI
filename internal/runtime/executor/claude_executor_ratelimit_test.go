@@ -463,6 +463,62 @@ func TestClaudeExecutor_RequestWouldExceedAllowanceDoesNotCoolCredential(t *test
 	}
 }
 
+func TestClaudeExecutor_WouldExceedWithExhaustedWindowCoolsAndFailsOver(t *testing.T) {
+	var exhaustedAttempts atomic.Int32
+	exhausted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		exhaustedAttempts.Add(1)
+		w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
+		w.Header().Set("Anthropic-Ratelimit-Unified-7d-Status", "rejected")
+		w.Header().Set("Anthropic-Ratelimit-Unified-7d-Utilization", "1.0")
+		w.Header().Set("Anthropic-Ratelimit-Unified-7d-Reset", strconv.FormatInt(time.Now().Add(72*time.Hour).Unix(), 10))
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account's rate limit. Please try again later."}}`))
+	}))
+	defer exhausted.Close()
+	healthy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg-ok","type":"message","model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer healthy.Close()
+
+	manager := cliproxyauth.NewManager(nil, nil, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.RegisterExecutor(NewClaudeExecutor(&config.Config{}))
+	reg := registry.GetGlobalRegistry()
+	baseID := uuid.NewString()
+	var exhaustedID string
+	for i, baseURL := range []string{exhausted.URL, healthy.URL} {
+		auth := &cliproxyauth.Auth{
+			ID: baseID + "-" + strconv.Itoa(i), Provider: "claude",
+			Attributes: map[string]string{"api_key": "test-key", "base_url": baseURL},
+		}
+		if i == 0 {
+			exhaustedID = auth.ID
+		}
+		reg.RegisterClient(auth.ID, "claude", []*registry.ModelInfo{{ID: "claude-opus-5-5"}})
+		t.Cleanup(func() { reg.UnregisterClient(auth.ID) })
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth: %v", err)
+		}
+	}
+
+	request := cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: []byte(`{"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)}
+	opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude}
+	for i := 0; i < 4; i++ {
+		response, err := manager.Execute(context.Background(), []string{"claude"}, request, opts)
+		if err != nil || !strings.Contains(string(response.Payload), `"ok"`) {
+			t.Fatalf("request %d = %v, response = %s; want failover success", i, err, response.Payload)
+		}
+	}
+	if got := exhaustedAttempts.Load(); got > 1 {
+		t.Fatalf("exhausted credential attempts = %d; want at most 1 before cooldown", got)
+	}
+	registered, _ := manager.GetByID(exhaustedID)
+	if registered == nil || !registered.Unavailable || !registered.Quota.Exceeded {
+		t.Fatalf("exhausted credential not cooled: %+v", registered)
+	}
+}
+
 func TestClaudeExecutor_AuthManager_CredentialScopeBlocksAllModelsAndAliases(t *testing.T) {
 	var upstreamAttempts atomic.Int32
 	now := time.Now()

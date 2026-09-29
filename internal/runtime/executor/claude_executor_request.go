@@ -693,7 +693,7 @@ func classifyClaudeUpstreamErrorWithCooling(statusCode int, headers http.Header,
 	}
 	err := statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter}
 	if statusCode == http.StatusTooManyRequests {
-		if claudeBodyIndicatesWouldExceedAllowance(body) {
+		if claudeBodyIndicatesWouldExceedAllowance(body) && !helps.ClaudeHeadersIndicateExhaustedSharedWindow(headers) {
 			return claudeRequestScopedRateLimitError{err}
 		}
 		if !modelLevelCooling && helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
@@ -710,6 +710,8 @@ func classifyClaudeUpstreamErrorWithCooling(statusCode int, headers http.Header,
 
 // A request that would exceed the remaining allowance does not imply that the
 // account is exhausted; a smaller request may still succeed before the reset.
+// Callers must still check for a fully consumed shared window, where Anthropic
+// sends the same message but no request can succeed until the reset.
 func claudeBodyIndicatesWouldExceedAllowance(body []byte) bool {
 	return strings.Contains(strings.ToLower(gjson.GetBytes(body, "error.message").String()), "this request would exceed your account's rate limit")
 }
