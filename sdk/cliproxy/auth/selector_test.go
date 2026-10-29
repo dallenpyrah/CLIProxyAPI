@@ -39,6 +39,94 @@ func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 	}
 }
 
+func TestEarliestWeeklyResetSelectorPick(t *testing.T) {
+	now := time.Now()
+	stamp := func(after time.Duration) string { return fmt.Sprint(now.Add(after).Unix()) }
+	for _, tc := range []struct {
+		name, provider, want string
+		a, z                 map[string]string
+		observedAt           time.Time
+	}{
+		{"claude ignores short window", "claude", "z",
+			map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": stamp(48 * time.Hour), "Anthropic-Ratelimit-Unified-5h-Reset": stamp(time.Hour)},
+			map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": stamp(24 * time.Hour)}, now},
+		{"codex weekly primary", "codex", "z",
+			map[string]string{"X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Reset-At": stamp(48 * time.Hour), "X-Codex-Secondary-Window-Minutes": "300", "X-Codex-Secondary-Reset-At": stamp(time.Hour)},
+			map[string]string{"X-Codex-Secondary-Window-Minutes": "10080", "X-Codex-Secondary-Reset-At": stamp(24 * time.Hour)}, now},
+		{"codex relative reset uses observation time", "codex", "a",
+			map[string]string{"X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Reset-After-Seconds": "39600"},
+			map[string]string{"X-Codex-Secondary-Window-Minutes": "10080", "X-Codex-Secondary-Reset-At": stamp(2 * time.Hour)}, now.Add(-10 * time.Hour)},
+		{"expired reset is unknown", "claude", "z",
+			map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": stamp(-time.Hour)},
+			map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": stamp(3 * time.Hour)}, now},
+		{"malformed reset is unknown", "claude", "z",
+			map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": "not-a-timestamp"},
+			map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": stamp(3 * time.Hour)}, now},
+		{"short window alone is unknown", "codex", "z",
+			map[string]string{"X-Codex-Primary-Window-Minutes": "300", "X-Codex-Primary-Reset-At": stamp(time.Hour)},
+			map[string]string{"X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Reset-At": stamp(3 * time.Hour)}, now},
+		{"absolute reset wins over relative", "codex", "z",
+			map[string]string{"X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Reset-At": stamp(4 * time.Hour), "X-Codex-Primary-Reset-After-Seconds": "3600"},
+			map[string]string{"X-Codex-Primary-Window-Minutes": "10080", "X-Codex-Primary-Reset-At": stamp(2 * time.Hour)}, now},
+		{"equal reset uses deterministic ID", "claude", "a",
+			map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": stamp(3 * time.Hour)},
+			map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": stamp(3 * time.Hour)}, now},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			auths := []*Auth{
+				{ID: "z", Provider: tc.provider, Quota: QuotaState{Signals: tc.z, ObservedAt: tc.observedAt}},
+				{ID: "a", Provider: tc.provider, Quota: QuotaState{Signals: tc.a, ObservedAt: tc.observedAt}},
+			}
+			got, err := (&EarliestWeeklyResetSelector{}).Pick(context.Background(), tc.provider, "", cliproxyexecutor.Options{}, auths)
+			if err != nil || got == nil || got.ID != tc.want {
+				t.Fatalf("Pick() = %v, %v; want %s", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestEarliestWeeklyResetSelectorKeepsEligibilityAndPriority(t *testing.T) {
+	for _, blocked := range []bool{true, false} {
+		auths := []*Auth{
+			{ID: "soon", Provider: "claude", Disabled: blocked, Quota: QuotaState{Signals: map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": fmt.Sprint(time.Now().Add(time.Hour).Unix())}}},
+			{ID: "later", Provider: "claude", Attributes: map[string]string{"priority": "1"}, Quota: QuotaState{Signals: map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": fmt.Sprint(time.Now().Add(24 * time.Hour).Unix())}}},
+		}
+		got, err := (&EarliestWeeklyResetSelector{}).Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, auths)
+		if err != nil || got == nil || got.ID != "later" {
+			t.Fatalf("Pick(disabled=%v) = %v, %v; want later", blocked, got, err)
+		}
+	}
+	selector := &EarliestWeeklyResetSelector{}
+	for i, want := range []string{"a", "b", "a"} {
+		got, err := selector.Pick(context.Background(), "claude", "", cliproxyexecutor.Options{}, []*Auth{{ID: "b"}, {ID: "a"}})
+		if err != nil || got == nil || got.ID != want {
+			t.Fatalf("unknown reset Pick #%d = %v, %v; want %s", i, got, err, want)
+		}
+	}
+}
+
+func TestEarliestWeeklyResetPreservesSessionAffinity(t *testing.T) {
+	selector := NewSessionAffinitySelector(&EarliestWeeklyResetSelector{})
+	t.Cleanup(selector.Stop)
+	auths := []*Auth{
+		{ID: "a", Provider: "claude", Quota: QuotaState{Signals: map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": fmt.Sprint(time.Now().Add(48 * time.Hour).Unix())}}},
+		{ID: "z", Provider: "claude", Quota: QuotaState{Signals: map[string]string{"Anthropic-Ratelimit-Unified-7d-Reset": fmt.Sprint(time.Now().Add(24 * time.Hour).Unix())}}},
+	}
+	pick := func(session, want string) {
+		t.Helper()
+		got, err := selector.Pick(context.Background(), "claude", "model", cliproxyexecutor.Options{Headers: http.Header{"X-Session-Id": {session}}}, auths)
+		if err != nil || got == nil || got.ID != want {
+			t.Fatalf("Pick(%s) = %v, %v; want %s", session, got, err, want)
+		}
+	}
+	pick("existing", "z")
+	auths[0].Quota.Signals["Anthropic-Ratelimit-Unified-7d-Reset"] = fmt.Sprint(time.Now().Add(time.Hour).Unix())
+	pick("existing", "z")
+	pick("new", "a")
+	auths[1].Disabled = true
+	pick("existing", "a")
+}
+
 func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	t.Parallel()
 

@@ -16,9 +16,10 @@ import (
 func TestManagerSessionAffinityAliasCooldownPreservesSelection(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	for strategy, newFallback := range map[string]func() Selector{
-		"round-robin":          func() Selector { return &RoundRobinSelector{} },
-		"weighted-round-robin": func() Selector { return &WeightedRoundRobinSelector{} },
-		"fill-first":           func() Selector { return &FillFirstSelector{} },
+		"round-robin":           func() Selector { return &RoundRobinSelector{} },
+		"weighted-round-robin":  func() Selector { return &WeightedRoundRobinSelector{} },
+		"fill-first":            func() Selector { return &FillFirstSelector{} },
+		"earliest-weekly-reset": func() Selector { return &EarliestWeeklyResetSelector{} },
 	} {
 		for _, mode := range []string{"no-session", "explicit-session", "lcp"} {
 			for _, path := range []string{"select", "execute", "stream"} {

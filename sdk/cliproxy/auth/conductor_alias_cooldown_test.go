@@ -15,9 +15,10 @@ import (
 func TestManagerAliasQuotaFailoverWithUnobservedTargetModel(t *testing.T) {
 	withQuotaCooldownEnabled(t)
 	for name, newSelector := range map[string]func() Selector{
-		"round-robin":          func() Selector { return &RoundRobinSelector{} },
-		"weighted-round-robin": func() Selector { return &WeightedRoundRobinSelector{} },
-		"fill-first":           func() Selector { return &FillFirstSelector{} },
+		"round-robin":           func() Selector { return &RoundRobinSelector{} },
+		"weighted-round-robin":  func() Selector { return &WeightedRoundRobinSelector{} },
+		"fill-first":            func() Selector { return &FillFirstSelector{} },
+		"earliest-weekly-reset": func() Selector { return &EarliestWeeklyResetSelector{} },
 	} {
 		for _, path := range []string{"select", "execute", "stream"} {
 			t.Run(name+"/"+path, func(t *testing.T) {
